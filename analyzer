@@ -1,0 +1,98 @@
+library(ggplot2)
+library(lattice)
+library(caret)
+library(mlbench)
+library(randomForest)
+library(pscl)
+library(MASS)
+library(gplots)
+library(ROCR)
+library(e1071)
+library(rpart)
+library(leaps)
+
+# standardizing function
+center_apply <- function(x) {
+  apply(x, 2, function(y) (y - mean(y))/sd(y))}
+
+
+#read data
+newsdata_full <- read.csv("/Users/jaideep/Documents/School/PetProjects/OnlineNewsPopularity.csv", header = T)
+newsdata_full <- newsdata_full[!newsdata_full$n_unique_tokens==701,]
+#remove URL & timedelta
+newsdata <- subset(newsdata_full, select = -c(url, timedelta))
+
+#creating binary response data
+newsdata_bin <- newsdata
+newsdata_bin$shares <- as.factor(ifelse(newsdata_bin$shares > 1400, 1, 0))
+
+# partition into training and testing
+set.seed(42)
+newsdata.index <-sample(2,nrow(newsdata_bin),replace=TRUE,prob=c(0.8,0.2))
+
+# Center data
+newsdata_cent <- center_apply(newsdata)
+newsdata_bin_cent <- center_apply(newsdata_bin[,-59])
+newsdata_bin_cent$shares <- newsdata_bin$shares
+newsdata_cent <- as.data.frame(newsdata_cent)
+newsdata_bin_cent <- as.data.frame(newsdata_bin_cent)
+
+
+
+
+# 0. run PCA
+newsdata_cent_pca <- prcomp(newsdata_cent)
+newsdata_cent_pca
+
+# PCA is not too effective. The output principal components are exactly equal in number to the number of initial predictors.
+
+# 1. classifying using kNN
+newsdata.knn <- knn3(shares ~.,newsdata_bin[newsdata.index==1,])
+newsdata.knn.pred <- predict(newsdata.knn, newsdata_bin[newsdata.index==2,], type = "class")
+newsdata.knn.prob <- predict(newsdata.knn, newsdata_bin[newsdata.index==2,], type = "prob")
+
+confusionMatrix(newsdata.knn.pred, newsdata_bin[newsdata.index==2,]$shares)
+
+# 2. Logistic Regression
+newsdata.lr <- glm(shares~., family = binomial (link = 'logit'), data = newsdata_bin_cent[newsdata.index==1,])
+summary(newsdata.lr)
+coeff.lr.index <- order(newsdata.lr$coefficients, decreasing = TRUE)
+newsdata.lr.varselect <- newsdata_bin_cent[,(coeff.lr.index<=20)]
+
+# Use chi-square test on anova estimates and select the top 20 coefficients
+anova.lr <- anova(newsdata.lr, test = "Chisq")
+coeff.lr <- order(anova.lr$`Pr(>Chi)`, decreasing = FALSE)
+coeff.lr.index <- coeff.lr - 1
+newsdata_lr_varselect <- newsdata_bin_cent[,c(coeff.lr.index[1:20])]
+newsdata_lr_varselect$shares <- newsdata_bin_cent$shares
+
+
+# Remove a 1% sample to perform feature selection
+set.seed(42)
+newsdata.featsel.index <-sample(3,nrow(newsdata_bin),replace=TRUE,prob= c(0.1,0.1,0.8))
+
+# Trying feature selection from caret package
+newsdata.control <- rfeControl(functions=rfFuncs, method = "cv", number = 10, allowParallel = TRUE)
+rfe_response <- newsdata[newsdata.featsel.index==1,59]
+rfe_vars <- newsdata[(newsdata.featsel.index==1),1:58]
+rfe.results <- rfe(rfe_vars, rfe_response, sizes = seq(1,50,10), rfeControl = newsdata.control)
+rfe.results
+plot(rfe.results, type = c("g","o"))
+
+# Run Random Forest on logistic regression variables
+newsdata.rf <- randomForest(shares~., data = newsdata_lr_varselect[(newsdata.featsel.index==1),], ntrees = 100, type = 'classification')
+summary(newsdata.rf)
+varImpPlot(newsdata.rf)
+rf.predict<- predict(newsdata.rf, newsdata_lr_varselect[(newsdata.featsel.index==2),])
+newsdata.rf$importance
+plot(newsdata.rf)
+hist(as.numeric(rf.predict))
+
+rf.accuracy <-
+
+newsdata.rf.index <- order(newsdata.rf$importance, decreasing = TRUE)
+
+newsdata.rf.modified <- randomForest(shares~., data = newsdata_lr_varselect[(newsdata.featsel.index==1),(newsdata.rf.index<=13)], ntrees = 100, type = 'classification')
+newsdata.rf.modified$confusion
+newsdata.rf.modified$importance
+newsdata.rf.modified$terms
